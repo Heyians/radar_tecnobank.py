@@ -684,20 +684,29 @@ def extrair_pb():
 
 
 def extrair_ap():
-    """AP — diofe.portal.ap.gov.br — busca PDF"""
+    """AP — diofe.portal.ap.gov.br — download direto da última edição"""
     try:
-        r = _get(PORTAIS["AP"]["url"], timeout=20)
-        soup = _soup(r.text)
+        base = "https://diofe.portal.ap.gov.br"
+        # Link direto para download da última edição
+        url_download = f"{base}/portal/edicoes/download/0"
+        r = requests.get(url_download, headers=HEADERS, timeout=60, allow_redirects=True)
+        content_type = r.headers.get("Content-Type", "")
+        if "pdf" in content_type or r.content[:4] == b"%PDF":
+            return _extrair_pdf_bytes(r.content)
+        # Fallback: scraping da home
+        r2 = _get(PORTAIS["AP"]["url"], timeout=20)
+        soup = _soup(r2.text)
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            txt = a.get_text().lower()
-            if ".pdf" in href.lower() and any(x in txt for x in ["diário", "diario", "doe", "edição"]):
+            if "download" in href.lower() or ".pdf" in href.lower():
                 if not href.startswith("http"):
-                    href = "https://diofe.portal.ap.gov.br" + href
-                return _baixar_e_extrair_pdf(href)
-        pdf_url = _primeiro_link_pdf(soup, "https://diofe.portal.ap.gov.br")
-        if pdf_url:
-            return _baixar_e_extrair_pdf(pdf_url)
+                    href = base + href
+                try:
+                    r3 = requests.get(href, headers=HEADERS, timeout=60, allow_redirects=True)
+                    if r3.content[:4] == b"%PDF":
+                        return _extrair_pdf_bytes(r3.content)
+                except Exception:
+                    pass
         return _texto_da_soup(soup)
     except Exception as e:
         return f"ERRO: {e}"
