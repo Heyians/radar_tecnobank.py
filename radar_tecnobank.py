@@ -231,7 +231,7 @@ PORTAIS = {
     "MG": {
         "nome": "Minas Gerais",
         "url": "https://www.jornalminasgerais.mg.gov.br/",
-        "estrategia": "generico",
+        "estrategia": "mg",
         "regiao": "SUDESTE",
     },
     "ES": {
@@ -261,13 +261,13 @@ PORTAIS = {
     "MT": {
         "nome": "Mato Grosso",
         "url": "https://www.iomat.mt.gov.br/",
-        "estrategia": "generico",
+        "estrategia": "mt",
         "regiao": "CENTRO-OESTE",
     },
     "MS": {
         "nome": "Mato Grosso do Sul",
         "url": "https://www.diariooficial.ms.gov.br/",
-        "estrategia": "generico",
+        "estrategia": "ms",
         "regiao": "CENTRO-OESTE",
     },
     "GO": {
@@ -310,7 +310,7 @@ PORTAIS = {
     "PB": {
         "nome": "Paraíba",
         "url": "https://auniao.pb.gov.br/doe",
-        "estrategia": "generico",
+        "estrategia": "pb",
         "regiao": "NORDESTE",
     },
     "RN": {
@@ -372,7 +372,7 @@ PORTAIS = {
     "AP": {
         "nome": "Amapá",
         "url": "https://diofe.portal.ap.gov.br/",
-        "estrategia": "generico",
+        "estrategia": "ap",
         "regiao": "NORTE",
     },
     "TO": {
@@ -461,40 +461,105 @@ def _baixar_e_extrair_pdf(url):
 # ── Extratores específicos ────────────────────────────────────────────────────
 
 def extrair_dou():
-    """DOU — in.gov.br"""
+    """DOU — in.gov.br — tenta múltiplas seções do dia"""
     try:
-        # A API do DOU fornece edições por data
+        textos = []
         data_api = HOJE.strftime("%Y-%m-%d")
-        url_api = f"https://www.in.gov.br/leiturajornal?data={data_api}&jornal=1"
-        r = _get(url_api)
-        soup = _soup(r.text)
-        # Busca todos os itens de matéria
-        texto = _texto_da_soup(soup)
-        if len(texto) < 200:
-            # Tenta a página principal
-            r2 = _get(PORTAIS["DOU"]["url"])
+        # Seções 1, 2 e 3
+        for jornal in ["1", "2", "3"]:
+            try:
+                url = f"https://www.in.gov.br/leiturajornal?data={data_api}&jornal={jornal}"
+                r = _get(url, timeout=20)
+                soup = _soup(r.text)
+                # Extrai matérias individuais via tags de conteúdo
+                for tag in soup.find_all(["p", "span", "div", "article", "section"]):
+                    t = tag.get_text(separator=" ", strip=True)
+                    if len(t) > 80:
+                        textos.append(t)
+            except Exception:
+                pass
+        texto = "\n".join(textos)
+        if len(texto) < 500:
+            # Fallback: página principal
+            r2 = _get(PORTAIS["DOU"]["url"], timeout=20)
             texto = _texto_da_soup(_soup(r2.text))
-        return texto
+        return texto[:MAX_CHARS]
     except Exception as e:
         return f"ERRO: {e}"
 
 
 def extrair_sp():
-    """SP — doe.sp.gov.br"""
+    """SP — doe.sp.gov.br — busca PDF via API de sumário"""
     try:
-        r = _get(PORTAIS["SP"]["url"])
+        data_sp = HOJE.strftime("%Y-%m-%d")
+        # API do DOE-SP retorna JSON com links dos cadernos
+        url_api = f"https://www.doe.sp.gov.br/api/sumario?data={data_sp}"
+        try:
+            r = _get(url_api, timeout=20)
+            data = r.json()
+            # Pega URL do primeiro caderno (Executivo)
+            for item in data if isinstance(data, list) else data.get("items", []):
+                url_pdf = item.get("urlPdf") or item.get("url") or ""
+                if url_pdf and ".pdf" in url_pdf.lower():
+                    return _baixar_e_extrair_pdf(url_pdf)
+        except Exception:
+            pass
+        # Fallback: página de sumário HTML
+        r = _get(PORTAIS["SP"]["url"], timeout=20)
         soup = _soup(r.text)
-        # Procura link de PDF do sumário do dia
-        pdf_url = _primeiro_link_pdf(soup, "https://doe.sp.gov.br")
-        if pdf_url:
-            return _baixar_e_extrair_pdf(pdf_url)
+        # Procura links de PDF no HTML
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if ".pdf" in href.lower() and ("doe" in href.lower() or "sp.gov" in href.lower()):
+                if not href.startswith("http"):
+                    href = "https://doe.sp.gov.br" + href
+                return _baixar_e_extrair_pdf(href)
+        return _texto_da_soup(soup)
+    except Exception as e:
+        return f"ERRO: {e}"
+
+
+def extrair_mg():
+    """MG — jornalminasgerais.mg.gov.br — busca PDF via API"""
+    try:
+        data_mg = HOJE.strftime("%Y-%m-%d")
+        # Tenta API do JMG
+        url_api = f"https://www.jornalminasgerais.mg.gov.br/api/jornal/edicao?data={data_mg}"
+        try:
+            r = _get(url_api, timeout=20)
+            data = r.json()
+            url_pdf = (data.get("urlPdf") or data.get("url") or
+                       (data[0].get("urlPdf") if isinstance(data, list) else None))
+            if url_pdf:
+                return _baixar_e_extrair_pdf(url_pdf)
+        except Exception:
+            pass
+        # Fallback: scraping da home
+        r = _get(PORTAIS["MG"]["url"], timeout=20)
+        soup = _soup(r.text)
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            txt = a.get_text().lower()
+            if ".pdf" in href.lower() or any(x in txt for x in ["hoje", "atual", "última"]):
+                if not href.startswith("http"):
+                    href = "https://www.jornalminasgerais.mg.gov.br" + href
+                if ".pdf" in href.lower():
+                    return _baixar_e_extrair_pdf(href)
+                try:
+                    r2 = _get(href, timeout=20)
+                    soup2 = _soup(r2.text)
+                    pdf = _primeiro_link_pdf(soup2, "https://www.jornalminasgerais.mg.gov.br")
+                    if pdf:
+                        return _baixar_e_extrair_pdf(pdf)
+                except Exception:
+                    pass
         return _texto_da_soup(soup)
     except Exception as e:
         return f"ERRO: {e}"
 
 
 def extrair_pr():
-    """PR — dioe.pr.gov.br (formulário de busca por data)"""
+    """PR — dioe.pr.gov.br"""
     try:
         data_pr = HOJE.strftime("%d/%m/%Y")
         url = (
@@ -512,14 +577,125 @@ def extrair_pr():
 
 
 def extrair_df():
-    """DF — dodf.df.gov.br"""
+    """DF — dodf.df.gov.br — múltiplas estratégias"""
     try:
-        # Tenta API JSON do DODF
         data_df = HOJE.strftime("%d-%m-%Y")
-        url_api = f"https://dodf.df.gov.br/list?nome={data_df}"
-        r = _get(url_api)
+        data_df2 = HOJE.strftime("%Y/%m/%d")
+        # Estratégia 1: API de listagem por data
+        for url in [
+            f"https://dodf.df.gov.br/index/api/list-files?dir=DODF/{data_df2}",
+            f"https://dodf.df.gov.br/list?nome={data_df}",
+            f"https://dodf.df.gov.br/",
+        ]:
+            try:
+                r = _get(url, timeout=20)
+                # Tenta JSON
+                try:
+                    data = r.json()
+                    # Procura URL de PDF no JSON
+                    import json
+                    txt_json = json.dumps(data)
+                    import re
+                    pdfs = re.findall(r'https?://[^"\']+\.pdf', txt_json)
+                    if pdfs:
+                        return _baixar_e_extrair_pdf(pdfs[0])
+                except Exception:
+                    pass
+                soup = _soup(r.text)
+                pdf_url = _primeiro_link_pdf(soup, "https://dodf.df.gov.br")
+                if pdf_url:
+                    return _baixar_e_extrair_pdf(pdf_url)
+                texto = _texto_da_soup(soup)
+                if len(texto) > 500:
+                    return texto
+            except Exception:
+                continue
+        return f"ERRO: portal DODF indisponível"
+    except Exception as e:
+        return f"ERRO: {e}"
+
+
+def extrair_mt():
+    """MT — iomat.mt.gov.br — busca PDF do dia"""
+    try:
+        r = _get(PORTAIS["MT"]["url"], timeout=20)
         soup = _soup(r.text)
-        pdf_url = _primeiro_link_pdf(soup, "https://dodf.df.gov.br")
+        # Padrão de URL: /portal/paginaPublica/visualizaDiario?...
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            txt = a.get_text().lower()
+            if ".pdf" in href.lower():
+                if not href.startswith("http"):
+                    href = "https://www.iomat.mt.gov.br" + href
+                return _baixar_e_extrair_pdf(href)
+            if any(x in txt for x in ["hoje", "atual", "última", "edição"]):
+                if not href.startswith("http"):
+                    href = "https://www.iomat.mt.gov.br" + href
+                try:
+                    r2 = _get(href, timeout=20)
+                    soup2 = _soup(r2.text)
+                    pdf = _primeiro_link_pdf(soup2, "https://www.iomat.mt.gov.br")
+                    if pdf:
+                        return _baixar_e_extrair_pdf(pdf)
+                except Exception:
+                    pass
+        return _texto_da_soup(soup)
+    except Exception as e:
+        return f"ERRO: {e}"
+
+
+def extrair_ms():
+    """MS — diariooficial.ms.gov.br — PDF disponível diretamente"""
+    try:
+        r = _get(PORTAIS["MS"]["url"], timeout=20)
+        soup = _soup(r.text)
+        # Padrão de URL: assets.imprensaoficial.ms.gov.br/.../DOxxxxx_DD_MM_YYYY.pdf
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            txt = a.get_text().lower()
+            if ".pdf" in href.lower() and any(x in txt for x in ["diário", "diario", "suplemento"]):
+                if not href.startswith("http"):
+                    href = "https://www.diariooficial.ms.gov.br" + href
+                return _baixar_e_extrair_pdf(href)
+        # Fallback: pega o primeiro PDF listado
+        pdf_url = _primeiro_link_pdf(soup, "https://www.diariooficial.ms.gov.br")
+        if pdf_url:
+            return _baixar_e_extrair_pdf(pdf_url)
+        return _texto_da_soup(soup)
+    except Exception as e:
+        return f"ERRO: {e}"
+
+
+def extrair_pb():
+    """PB — auniao.pb.gov.br — PDF com padrão de data na URL"""
+    try:
+        r = _get(PORTAIS["PB"]["url"], timeout=20)
+        soup = _soup(r.text)
+        # Padrão: diario-oficial-DD-MM-YYYY-portal.pdf
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if ".pdf" in href.lower() and "diario-oficial" in href.lower():
+                if not href.startswith("http"):
+                    href = "https://auniao.pb.gov.br" + href
+                return _baixar_e_extrair_pdf(href)
+        return _texto_da_soup(soup)
+    except Exception as e:
+        return f"ERRO: {e}"
+
+
+def extrair_ap():
+    """AP — diofe.portal.ap.gov.br — busca PDF"""
+    try:
+        r = _get(PORTAIS["AP"]["url"], timeout=20)
+        soup = _soup(r.text)
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            txt = a.get_text().lower()
+            if ".pdf" in href.lower() and any(x in txt for x in ["diário", "diario", "doe", "edição"]):
+                if not href.startswith("http"):
+                    href = "https://diofe.portal.ap.gov.br" + href
+                return _baixar_e_extrair_pdf(href)
+        pdf_url = _primeiro_link_pdf(soup, "https://diofe.portal.ap.gov.br")
         if pdf_url:
             return _baixar_e_extrair_pdf(pdf_url)
         return _texto_da_soup(soup)
@@ -646,10 +822,20 @@ def extrair(sigla):
             return extrair_dou()
         elif estrategia == "sp":
             return extrair_sp()
+        elif estrategia == "mg":
+            return extrair_mg()
         elif estrategia == "pr":
             return extrair_pr()
         elif estrategia == "df":
             return extrair_df()
+        elif estrategia == "mt":
+            return extrair_mt()
+        elif estrategia == "ms":
+            return extrair_ms()
+        elif estrategia == "pb":
+            return extrair_pb()
+        elif estrategia == "ap":
+            return extrair_ap()
         elif estrategia == "ce":
             return extrair_ce()
         elif estrategia == "pi":
